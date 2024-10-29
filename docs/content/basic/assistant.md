@@ -4,17 +4,66 @@ lang: en
 slug: /concepts/assistant
 ---
 
-This guide focuses on how to implement Agents & Assistants using Bolt. For general information about the feature, please refer to the [API documentation](https://api.slack.com/docs/apps/ai).
+:::info[This feature requires a paid plan]
+If you don't have a paid workspace for development, you can join the [Developer Program](https://api.slack.com/developer-program) and provision a sandbox with access to all Slack features for free.
+:::
 
-To get started, enable the **Agents & Assistants** feature on [the app configuration page](https://api.slack.com/apps). Add [`assistant:write`](https://api.slack.com/scopes/assistant:write), [`chat:write`](https://api.slack.com/scopes/chat:write), and [`im:history`](https://api.slack.com/scopes/im:history) to the **bot** scopes on the **OAuth & Permissions** page. Make sure to subscribe to [`assistant_thread_started`](https://api.slack.com/events/assistant_thread_started), [`assistant_thread_context_changed`](https://api.slack.com/events/assistant_thread_context_changed), and [`message.im`](https://api.slack.com/events/message.im) events on the **Event Subscriptions** page.
+Agents and assistants comprise a new messaging experience for Slack. If you're unfamiliar with using agents and assistants within Slack, you'll want to read the [API documentation on the subject](https://api.slack.com/docs/apps/ai). Then, come back here to implement them with Bolt!
 
-Please note that this feature requires a paid plan. If you don't have a paid workspace for development, you can join the [Developer Program](https://api.slack.com/developer-program) and provision a sandbox with access to all Slack features for free.
+## Configuring your app to support assistants 
 
-To handle assistant thread interactions with humans, although you can implement your agents [using `app.event(...)` listeners](event-listening) for `assistant_thread_started`, `assistant_thread_context_changed`, and `message` events, Bolt offers a simpler approach. You just need to create an `Assistant` instance, attach the needed event handlers to it, and then add the assistant to your `App` instance.
+1. Within [App Settings](https://api.slack.com/apps), enable the **Agents & Assistants** feature.
 
-```python
+2. Within the App Settings **OAuth & Permissions** page, add the following scopes: 
+  * [`assistant:write`](https://api.slack.com/scopes/assistant:write)
+  * [`chat:write`](https://api.slack.com/scopes/chat:write)
+  * [`im:history`](https://api.slack.com/scopes/im:history)
+
+3. Within the App Settings **Event Subscriptions** page, subscribe to the following events: 
+  * [`assistant_thread_started`](https://api.slack.com/events/assistant_thread_started)
+  * [`assistant_thread_context_changed`](https://api.slack.com/events/assistant_thread_context_changed)
+  * [`message.im`](https://api.slack.com/events/message.im)
+
+:::info
+You _could_ implement your own assistants by [listening](/concepts/event-listening) for the `assistant_thread_started`, `assistant_thread_context_changed`, and `message.im` events. That being said, using the `Assistant` class will streamline the process. And we already wrote this nice guide for you!
+:::
+
+## The `Assistant` class instance
+
+You'll need to create an [`Assistant`](https://tools.slack.dev/bolt-python/api-docs/slack_bolt/middleware/assistant/assistant.html#slack_bolt.middleware.assistant.assistant.Assistant) instance, attach the needed event handlers to it, and then add the assistant to your [`App`](https://tools.slack.dev/bolt-python/api-docs/slack_bolt/app/app.html) instance.
+
+```py
 assistant = Assistant()
 
+# Invoked when a human user opens an assistant thread
+@assistant.thread_started
+def start_assistant_thread(say: Say, set_suggested_prompts: SetSuggestedPrompts):
+
+# Invoked when the human user sends a reply
+@assistant.user_message
+def respond_in_assistant_thread(
+    payload: dict,
+    logger: logging.Logger,
+    context: BoltContext,
+    set_status: SetStatus,
+    client: WebClient,
+    say: Say,
+):
+
+# Enable the assistant middleware in your Bolt app
+app.use(assistant)
+```
+
+
+You can store context through the `thread_context_store` property but it must feature `get` and `save` methods. If not provided, a `DefaultThreadContextStore` instance is utilized instead, which is a reference implementation that relies on storing and retrieving message metadata as the context changes.
+!!!!!
+
+## Handling a new thread 
+
+The [`thread_started`](https://tools.slack.dev/bolt-python/api-docs/slack_bolt/middleware/assistant/assistant.html#slack_bolt.middleware.assistant.assistant.Assistant.thread_started) event handler allows your app to respond to new threads opened by users. In the example below, the app is sending a message to the user. It is also sending along two [prompts](https://api.slack.com/methods/assistant.threads.setSuggestedPrompts) using the [`set_suggested_prompts`](https://tools.slack.dev/bolt-python/api-docs/slack_bolt/context/set_suggested_prompts/index.html) utility. 
+
+```python
+...
 # This listener is invoked when a human user opened an assistant thread
 @assistant.thread_started
 def start_assistant_thread(say: Say, set_suggested_prompts: SetSuggestedPrompts):
@@ -29,7 +78,39 @@ def start_assistant_thread(say: Say, set_suggested_prompts: SetSuggestedPrompts)
             "When Slack was released?",
         ],
     )
+...
+```
 
+
+:::tip
+When a user opens an assistant thread while in a channel, the channel info is stored as the thread's `AssistantThreadContext` data. You can grab that info using the `get_thread_context` utility, as subsequent user message event payloads won't include the channel info. 
+:::
+
+---
+
+## Handling context changes
+
+When the user switches channels, the `assistant_thread_context_changed` event will be sent to your app. If you use the built-in `Assistant` middleware without any custom configuration the updated context data is automatically saved as message metadata on the first reply from the assistant bot.
+
+When the user switches channels, the `assistant_thread_context_changed` event will be sent to your app. You can capture this with a custom `AssistantThreadContextStore` implementation to the `Assistant` constructor. We provide `FileAssistantThreadContextStore`, which is a reference implementation that uses the local file system:
+
+```python
+# You can use your own thread_context_store if you want
+from slack_bolt import FileAssistantThreadContextStore
+assistant = Assistant(thread_context_store=FileAssistantThreadContextStore())
+```
+
+Since this reference implementation relies on local files, it's not advised for use in production. For production apps, we recommend creating a class that inherits `AssistantThreadContextStore`.
+
+## Handling the user response
+
+User messages are handled with the [`user_message`](https://tools.slack.dev/bolt-python/api-docs/slack_bolt/middleware/assistant/assistant.html#slack_bolt.middleware.assistant.assistant.Assistant.user_message) event handler. The [`set_title`](https://tools.slack.dev/bolt-python/api-docs/slack_bolt/context/set_title/index.html) and [`set_status`](https://tools.slack.dev/bolt-python/api-docs/slack_bolt/context/set_status/index.html) utilities are useful in curating the user experience. 
+
+:::warning
+Messages sent to the assistant do not contain a subtype and must be deduced based on their shape and any provided metadata.
+:::
+
+```py
 # This listener is invoked when the human user sends a reply in the assistant thread
 @assistant.user_message
 def respond_in_assistant_thread(
@@ -68,39 +149,24 @@ def respond_in_assistant_thread(
         # Without this, the status 'is typing...' won't be cleared, therefore the end-user is unable to continue the chat
         say(f":warning: Sorry, something went wrong during processing your request (error: {e})")
 
-# Enable this assistant middleware in your Bolt app
-app.use(assistant)
+...
 ```
 
-Refer to [the module document](https://tools.slack.dev/bolt-python/api-docs/slack_bolt/kwargs_injection/args.html) to learn the available listener arguments.
+Refer to [the module document](https://tools.slack.dev/bolt-python/api-docs/slack_bolt/kwargs_injection/args.html) to view all the available listener arguments.
 
-When a user opens an Assistant thread while in a channel, the channel information is stored as the thread's `AssistantThreadContext` data. You can access this information by using the `get_thread_context` utility. The reason Bolt provides this utility is that the most recent thread context information is not included in the subsequent user message event payload data. Therefore, an app must store the context data when it is changed so that the app can refer to the data in message event listeners.
-
-When the user switches channels, the `assistant_thread_context_changed` event will be sent to your app. If you use the built-in `Assistant` middleware without any custom configuration (like the above code snippet does), the updated context data is automatically saved as message metadata of the first reply from the assistant bot.
-
-As long as you use the built-in approach, you don't need to store the context data within a datastore. The downside of this default behavior is the overhead of additional calls to the Slack API. These calls include those to `conversations.history` which are used to look up the stored message metadata that contains the thread context (via `get_thread_context`).
-
-To store context elsewhere, pass a custom `AssistantThreadContextStore` implementation to the `Assistant` constructor. We provide `FileAssistantThreadContextStore`, which is a reference implementation that uses the local file system:
-
-```python
-# You can use your own thread_context_store if you want
-from slack_bolt import FileAssistantThreadContextStore
-assistant = Assistant(thread_context_store=FileAssistantThreadContextStore())
-```
-
-Since this reference implementation relies on local files, it's not advised for use in production. For production apps, we recommend creating a class that inherits `AssistantThreadContextStore`.
-
-<details>
-
-<summary>
-Block Kit interactions in the assistant thread
-</summary>
+## Using Block Kit in assistant threads 
 
 For advanced use cases, Block Kit buttons may be used instead of suggested prompts, as well as the sending of messages with structured [metadata](https://api.slack.com/metadata) to trigger subsequent interactions with the user.
 
 For example, an app can display a button like "Summarize the referring channel" in the initial reply. When the user clicks the button and submits detailed information (such as the number of messages, days to check, the purpose of the summary, etc.), the app can handle that information and post a message that describes the request with structured metadata.
 
-By default, apps can't respond to their own bot messages (Bolt prevents infinite loops by default). However, if you pass `ignoring_self_assistant_message_events_enabled=False` to the `App` constructor and add a `bot_message` listener to your `Assistant` middleware, your app can continue processing the request as shown below:
+By default, apps can't respond to their own bot messages (Bolt prevents infinite loops by default). However, if you pass `ignoring_self_assistant_message_events_enabled=False` to the `App` constructor and add a `bot_message` listener to your `Assistant` middleware, your app can continue processing the request.
+
+<details>
+
+<summary>
+Block Kit example
+</summary>
 
 ```python
 app = App(
@@ -237,5 +303,14 @@ app.use(assistant)
 
 </details>
 
+## Full example
 
-Lastly, if you want to check full working example app, you can check [our sample repository](https://github.com/slack-samples/bolt-python-assistant-template) on GitHub.
+<details>
+<summary>App Agent & Assistant Template</summary>
+
+Below is the `assistant.py` file of the [App Agent & Assistant Template repo](https://github.com/slack-samples/bolt-python-assistant-template/) we've created for you to build off of. 
+
+```js reference title="app.py"
+https://github.com/slack-samples/bolt-python-assistant-template/blob/main/listeners/assistant.py
+```
+</details>
